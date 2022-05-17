@@ -1,0 +1,249 @@
+---
+title: '[PS531] Final_PAP_Code Appendix'
+author: "Jaeyoung Lee"
+date: '2022-05-17'
+output: pdf_document
+---
+
+```{r, Data and Variables, echo = FALSE, warning = FALSE, message = FALSE}
+
+#Create fake data
+wrkdat <- data.frame(id = c(1:1000), 
+                     usaid = sample(30000:300000, 1000, replace = TRUE),
+                     chaid = sample(30000:900000, 1000, replace = TRUE),
+                     hdi = runif(1000, 0, 20000),
+                     gdppc = sample(0:20000, 1000, replace = TRUE),
+                     wgici = rnorm(1000, mean = 5, sd = 10),
+                     polity = rnorm(1000, mean = 7, sd = 7))
+
+#Create Us-China Rivalry Variable
+wrkdat$b1 <- (wrkdat$usaid) + (wrkdat$chaid) 
+wrkdat$b2 <- 1 - abs((wrkdat$usaid/wrkdat$b1) - (wrkdat$chaid/wrkdat$b1))
+wrkdat$b3 <- (wrkdat$b1)*(wrkdat$b2)
+
+#Degree of Aid Competition
+summary(wrkdat$b3)
+wrkdat$b3.bin <- 0
+wrkdat$b3.bin[wrkdat$b3 >289886] <- 1
+table(wrkdat$b3.bin)
+
+#Subset Data to Examine the Second Hypothesis
+summary(wrkdat$wgici)
+l.corruption <- subset(wrkdat, wgici < 4.711)
+h.corruption <- subset(wrkdat, wgici > 4.711)
+```
+
+
+```{r Mahalanobis distance, echo = FALSE, warning = FALSE, message = FALSE}
+
+library(dplyr)
+
+covs <- c("gdppc", "wgici", "polity")
+covmat <- select(wrkdat, one_of(covs))
+
+wrkdat$covmh <- mahalanobis(
+  x = covmat,
+  center = colMeans(covmat),
+  cov = cov(covmat)
+)
+
+mhdist_mat <- outer(wrkdat$covmh, wrkdat$covmh, FUN =\(x, y) abs(x - y))
+mhdist_mat
+```
+
+```{r Non Bipartite Matching, echo = TRUE, warning = FALSE, message = FALSE}
+
+library(designmatch)
+
+matchdist_mat <- round(mhdist_mat / mean(mhdist_mat), 2)
+nearlist <- list(covs=as.matrix(wrkdat$b3),pairs=c(b3=10000))
+solverlist <- list(name = "glpk", approximate = 1, t_max = 100, trace = 1)
+
+mh_pairs <- nmatch(  
+  dist_mat = matchdist_mat, 
+  near = nearlist, 
+  subset_weight = 1, 
+  solver = solverlist
+)
+
+mh_pairs
+
+nmatch_to_df <- function(obj, origid) {
+  matchesdat <- data.frame(
+    bm = obj$group_id,
+    match_id = c(obj$id_1, obj$id_2)
+  )
+  matchesdat$id <- origid[matchesdat$match_id]
+  return(matchesdat)
+}
+
+mh_pairs_df <- nmatch_to_df(mh_pairs,origid=wrkdat$nh)
+mh_pairs_df$nh <- mh_pairs_df$id
+
+#These are my matched pairs
+mh_pairs_df %>% filter(bm==1) #in the first pair, id 1 and 899 are matched
+mh_pairs_df %>% filter(bm==2)
+mh_pairs_df %>% filter(bm==3)
+mh_pairs_df %>% filter(bm==4)
+mh_pairs_df %>% filter(bm==5)
+
+mh_pairs_df$id <- mh_pairs_df$bm 
+
+wrkdat2 <- inner_join(wrkdat, mh_pairs_df, by = "id")
+wrkdat2$bmF <- as.factor(wrkdat2$bm)
+
+table(mh_pairs_df)
+wrkdat2 %>% filter(bm==10)
+
+```
+
+
+```{r Balance Test, echo = TRUE, warning = FALSE, message = FALSE}
+
+library(RItools)
+
+#I am aware that I have to include "strata = factor(wrkdat2$bm)" in the code, but if I include these, R returns that all stratum weights NA. So, I am going to commenting this out and run balance test without stratification just to see p-value. 
+#xb_obs <- xBalance(b3 ~ gdppc + wgici + polity, strata = factor(wrkdat2$bm), data = wrkdat2, report = "all")
+xb_obs <- xBalance(b3 ~ gdppc + wgici + polity, data = wrkdat2, report = "all")
+xb_obs$overall #p-value==0.0311
+
+#The p-value is smaller than 0.05, which means I cannot reject null hypothesis of chi-sqaured test.
+#It means that my matching pairs are not balanced enough. 
+```
+
+
+```{r, Statistical Test, echo = TRUE, warning = FALSE, message = FALSE}
+
+#In this chunk, I am assessing *tests*.
+
+library(DeclareDesign)
+library(fabricatr)
+library(randomizr)
+library(coin)
+library(estimatr)
+library(robustbase)
+library(knitr)
+
+#Propensity Score
+install.packages("optmatch")
+library(optmatch)
+ps_mod <- glm(b3.bin ~ gdppc + wgici + polity, family = gaussian(link="identity"), 
+              data = wrkdat)
+ps_dist <- match_on(ps_mod, data = wrkdat)
+
+#Full-Matching with Propensity Score
+wrkdat$fmps <- fullmatch(ps_dist, data = wrkdat)
+wrkdat$fmps.F <- as.factor(wrkdat$fmps)
+
+
+#Tranform Dataset
+wrkdat$pmps <- pairmatch(ps_dist, data = wrkdat)
+wrkdat$pmps.f <- as.factor(wrkdat$pmps)
+wrkdat$pmps.n <- as.numeric(wrkdat$pmps)
+as.trt <- subset(wrkdat, b3.bin == 1)
+as.trt$hdi_b3.bin_1 <- coef(lm(hdi ~ b3.bin, fixed_effects = ~pmps.f, data = as.trt))
+as.ctr <- subset(wrkdat, b3.bin == 0)
+as.ctr$hdi_b3.bin_0 <- coef(lm(hdi ~ b3.bin, fixed_effects = ~pmps.f, data = as.ctr))
+trf.wrkdat <- left_join(as.trt, as.ctr, by = "pmps.n")
+wrkdat$b3.bin[wrkdat$b3 >302909] <- 1
+
+#M: Model
+pop <- declare_population(wrkdat)
+potential_outcomes <- declare_potential_outcomes(Y ~ 127.1*Z + rnorm(N))
+reveal_outcomes <- declare_reveal(Y,Z)
+
+#I: Inquiry
+estimand <- declare_inquiry(PATE=mean(Y_Z_1 - Y_Z_0, label="ATE"))
+
+#D: Data Strategy
+assignment <- declare_assignment(Z = conduct_ra(N = N, m=1000))
+
+#A: Answer Strategy
+##wilcox test
+wilcox_test_clt <- function(data){
+res <- wilcox_test(hdi~as.factor(b3.bin)|fmps.F,data=wrkdat,distribution = approximate(nresample=500))
+       data.frame(statistic = statistic(res)[[1]], p.value = pvalue(res)[[1]])
+}
+test1 <- declare_test(handler=label_test(wilcox_test_clt),label="wilcox CLT test")
+
+#independent test
+independent_test <- function(data){
+res <- independence_test(hdi~as.factor(b3.bin)|fmps.F,data=wrkdat,distribution = approximate(nresample=500))
+       data.frame(statistic = statistic(res)[[1]], p.value = pvalue(res)[[1]])
+}
+test2 <- declare_test(handler=label_test(independent_test),label="independence test")
+
+test1(wrkdat)
+test2(wrkdat)
+
+
+mydesign_for_test <- pop + potential_outcomes + estimand + assignment + reveal_outcomes + test1 + test2
+
+my_diagnosands<- declare_diagnosands(
+                false_positive_rate = mean(p.value <= .05 ,na.rm=TRUE),
+                power = mean(p.value <= .05 ,na.rm=TRUE))
+
+diagonosis <- diagnose_design(mydesign_for_test, bootstrap_sims=0, sims = 100, diagnosands = my_diagnosands)
+diagonosis
+
+```
+
+
+```{r, Statistical Test, echo = TRUE, warning = FALSE, message = FALSE}
+
+#In this chunk, I am assessing *estimators*.
+
+#M: Model
+pop <- declare_population(wrkdat)
+potential_outcomes <- declare_potential_outcomes(Y ~ 127.1*Z + rnorm(N))
+reveal_outcomes <- declare_reveal(Y,Z)
+
+#I: Inquiry
+estimand <- declare_inquiry(PATE=mean(Y_Z_1 - Y_Z_0, label="ATE"))
+
+#D: Data Strategy
+assignment <- declare_assignment(Z = conduct_ra(N = N, m=1000))
+
+#A: Answer Strategy
+est0 <- declare_estimator(hdi~b3.bin, fixed_effects=~fmps.F, model=lm, label="OLS lm",term="b3.bin")
+est1 <- declare_estimator(hdi~b3.bin, fixed_effects=~fmps.F, model=lm_robust, se_type = "HC0", label="lm_robust with HC0",term="b3.bin")
+est2 <- declare_estimator(hdi~b3.bin, fixed_effects=~fmps.F, model=lm_robust, se_type = "HC2", label="lm_robust with HC2",term="b3.bin")
+est3 <- declare_estimator(hdi~b3.bin, model=glm, family=gaussian(link = "identity"), label="glm",term="b3.bin")
+
+est0(wrkdat)
+est1(wrkdat)
+est2(wrkdat)
+est3(wrkdat)
+
+mydesign_for_estimator <- pop + potential_outcomes + estimand + assignment + reveal_outcomes + est0 + est1 + est2 + est3
+
+my_diagnosands2<- declare_diagnosands(
+                bias = mean(estimate - estimand,na.rm=TRUE),
+                rmse = sqrt(mean((estimate - estimand) ^ 2,na.rm=TRUE)))
+
+diagonosis2 <- diagnose_design(mydesign_for_estimator, bootstrap_sims=0, sims = 100, diagnosands = my_diagnosands2)
+diagonosis2
+
+```
+
+
+```{r Mock Table, echo = TRUE, warning = FALSE, message = FALSE}
+library(stargazer)
+library(kableExtra)
+library(xtable)
+library(texreg)
+
+#Hypothesis 1
+md1 <- lm(hdi~b3+wgici+polity+gdppc, fixed_effects = ~bmF, data = wrkdat2)
+summary(md1)
+
+texreg(list(md1))
+
+#Hypothesis2
+md2 <- lm(hdi~b3+wgici+polity+gdppc, fixed_effects = ~bmF, data = h.corruption)
+summary(md2)
+md3 <- lm(hdi~b3+wgici+polity+gdppc, fixed_effects = ~bmF, data = l.corruption)
+summary(md3)
+
+texreg(list(md2, md3))
+```
